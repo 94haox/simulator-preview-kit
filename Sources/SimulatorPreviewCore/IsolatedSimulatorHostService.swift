@@ -69,9 +69,12 @@ public struct IsolatedSimulatorHostService {
         app: SimulatorPreviewApp,
         preferredDeviceName: String? = nil
     ) throws -> IsolatedSimulatorSession {
-        let selectedDevice = try selectOrCreatePreferredIPhoneDevice(preferredName: preferredDeviceName ?? configuration.preferredDeviceName)
+        let selectedDevice = try selectOrCreatePreferredIPhoneDevice(
+            preferredName: preferredDeviceName ?? configuration.preferredDeviceName
+        )
         _ = try? terminate(bundleId: app.bundleIdentifier, in: selectedDevice)
-        try boot(selectedDevice)
+        let arch = Self.requiresRosetta(appURL: app.appBundleURL) ? "x86_64" : nil
+        try boot(selectedDevice, arch: arch)
         try waitForBoot(selectedDevice)
         try ensureInstalledAppIsCurrent(appURL: app.appBundleURL, bundleID: app.bundleIdentifier, device: selectedDevice)
         try launchOrInstallIfNeeded(appURL: app.appBundleURL, bundleID: app.bundleIdentifier, device: selectedDevice)
@@ -202,10 +205,14 @@ public struct IsolatedSimulatorHostService {
         )
     }
 
-    func boot(_ device: SelectedSimulator) throws {
+    func boot(_ device: SelectedSimulator, arch: String? = nil) throws {
         _ = try? processRunner.runCapturing(
             "xcrun",
-            Self.bootArguments(deviceSetPath: configuration.deviceSetPath, deviceUDID: device.udid)
+            Self.bootArguments(
+                deviceSetPath: configuration.deviceSetPath,
+                deviceUDID: device.udid,
+                arch: arch
+            )
         )
     }
 
@@ -301,8 +308,20 @@ public struct IsolatedSimulatorHostService {
         )
     }
 
-    static func bootArguments(deviceSetPath: String, deviceUDID: String) -> [String] {
-        SimulatorSupport.simctlArguments(command: ["boot", deviceUDID], deviceSetPath: deviceSetPath)
+    static func bootArguments(
+        deviceSetPath: String,
+        deviceUDID: String,
+        arch: String? = nil
+    ) -> [String] {
+        var command = ["boot"]
+        if let arch {
+            command += ["--arch=\(arch)"]
+        }
+        command.append(deviceUDID)
+        return SimulatorSupport.simctlArguments(
+            command: command,
+            deviceSetPath: deviceSetPath
+        )
     }
 
     static func bootStatusArguments(deviceSetPath: String, deviceUDID: String) -> [String] {
@@ -487,6 +506,33 @@ public struct IsolatedSimulatorHostService {
         let data = Data(lines.joined(separator: "\n").utf8)
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func requiresRosetta(appURL: URL) -> Bool {
+        let execName = appURL.deletingPathExtension().lastPathComponent
+        let execURL = appURL.appendingPathComponent(execName)
+        guard FileManager.default.fileExists(atPath: execURL.path) else {
+            return false
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/file")
+        process.arguments = [execURL.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let output = String(
+                data: pipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            let hasArm64 = output.contains("arm64")
+            let hasX86 = output.contains("x86_64")
+            return hasX86 && !hasArm64
+        } catch {
+            return false
+        }
     }
 
     private func requireSuccess(_ result: ProcessResult) throws {

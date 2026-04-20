@@ -316,11 +316,10 @@ public struct IsolatedSimulatorHostService {
         deviceUDID: String,
         arch: String? = nil
     ) -> [String] {
-        var command = ["boot"]
+        var command = ["boot", deviceUDID]
         if let arch {
-            command += ["--arch=\(arch)"]
+            command.append("--arch=\(arch)")
         }
-        command.append(deviceUDID)
         return SimulatorSupport.simctlArguments(
             command: command,
             deviceSetPath: deviceSetPath

@@ -23,6 +23,14 @@
 - 需要跨平台支持
 - 需要标准公开 API、避免 Apple 私有桥接
 
+## 详细使用说明
+
+面向宿主开发者的完整使用指南（安装、所有 API、配置项、嵌入姿势、排查）：
+
+- [docs/usage.md](docs/usage.md)
+
+下面的“快速开始”只是最小上手路径，深入使用请看上面的文档。
+
 ## 快速开始
 
 ### 方式 1：先用 CLI demo 验证链路
@@ -209,8 +217,9 @@ POST /input
 
 1. [AGENTS.md](AGENTS.md)
 2. [docs/agent-quickstart.md](docs/agent-quickstart.md)
-3. [docs/plans/2026-04-20-simulator-preview-kit-design.md](docs/plans/2026-04-20-simulator-preview-kit-design.md)
-4. `Sources/SimulatorPreviewKit/LocalWebPreviewSession.swift`
+3. [docs/usage.md](docs/usage.md)
+4. [docs/plans/2026-04-20-simulator-preview-kit-design.md](docs/plans/2026-04-20-simulator-preview-kit-design.md)
+5. `Sources/SimulatorPreviewKit/LocalWebPreviewSession.swift`
 
 ## 排查建议
 

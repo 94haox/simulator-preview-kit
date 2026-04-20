@@ -352,7 +352,7 @@ enum EmbeddedWebAssets {
                 <img id="frame" alt="Simulator preview frame" hidden />
               </div>
               <div class="hint">
-                Frames are pushed via WebSocket for low-latency preview. Falls back to image polling if WebSocket is unavailable. Pointer events map to touch input. Wheel maps to scroll. Keyboard events are forwarded.
+                WebSocket preview. Pointer = touch, wheel = scroll, keyboard forwarded.
               </div>
             </section>
           </main>

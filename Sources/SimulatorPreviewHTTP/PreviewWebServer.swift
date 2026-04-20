@@ -23,17 +23,22 @@ public struct PreviewWebServerConfiguration: Sendable {
     }
 }
 
+// swiftlint:disable:next type_body_length
 public final class PreviewWebServer {
+    struct Providers {
+        let pageContext: @Sendable () -> PreviewPageContext
+        let cachedFrame: @Sendable () -> PreviewFrameSnapshot?
+        let freshFrame: @Sendable () async throws -> PreviewFrameSnapshot?
+        let renderableFrame: @Sendable () -> PreviewRenderableFrame?
+        let videoStatus: @Sendable () -> PreviewVideoStreamStatus
+        let playlist: @Sendable () -> Data?
+        let initSegment: @Sendable () -> Data?
+        let mediaSegment: @Sendable (String) -> Data?
+        let interaction: @Sendable (PreviewInteractionEvent) async throws -> Void
+    }
+
     private let configuration: PreviewWebServerConfiguration
-    private let pageContextProvider: @Sendable () -> PreviewPageContext
-    private let cachedFrameProvider: @Sendable () -> PreviewFrameSnapshot?
-    private let freshFrameProvider: @Sendable () async throws -> PreviewFrameSnapshot?
-    private let renderableFrameProvider: @Sendable () -> PreviewRenderableFrame?
-    private let videoStatusProvider: @Sendable () -> PreviewVideoStreamStatus
-    private let playlistProvider: @Sendable () -> Data?
-    private let initializationSegmentProvider: @Sendable () -> Data?
-    private let mediaSegmentProvider: @Sendable (String) -> Data?
-    private let interactionHandler: @Sendable (PreviewInteractionEvent) async throws -> Void
+    private let providers: Providers
     private let frameIntervalNanoseconds: UInt64
 
     private var server: SimpleHTTPServer?
@@ -41,7 +46,7 @@ public final class PreviewWebServer {
     private(set) public var pageURL: URL?
 
     public init(
-        configuration: PreviewWebServerConfiguration = PreviewWebServerConfiguration(),
+        configuration: PreviewWebServerConfiguration = .init(),
         pageContextProvider: @escaping @Sendable () -> PreviewPageContext,
         cachedFrameProvider: @escaping @Sendable () -> PreviewFrameSnapshot?,
         freshFrameProvider: @escaping @Sendable () async throws -> PreviewFrameSnapshot?,
@@ -54,15 +59,17 @@ public final class PreviewWebServer {
         frameIntervalNanoseconds: UInt64 = 33_000_000
     ) {
         self.configuration = configuration
-        self.pageContextProvider = pageContextProvider
-        self.cachedFrameProvider = cachedFrameProvider
-        self.freshFrameProvider = freshFrameProvider
-        self.renderableFrameProvider = renderableFrameProvider
-        self.videoStatusProvider = videoStatusProvider
-        self.playlistProvider = playlistProvider
-        self.initializationSegmentProvider = initializationSegmentProvider
-        self.mediaSegmentProvider = mediaSegmentProvider
-        self.interactionHandler = interactionHandler
+        self.providers = Providers(
+            pageContext: pageContextProvider,
+            cachedFrame: cachedFrameProvider,
+            freshFrame: freshFrameProvider,
+            renderableFrame: renderableFrameProvider,
+            videoStatus: videoStatusProvider,
+            playlist: playlistProvider,
+            initSegment: initializationSegmentProvider,
+            mediaSegment: mediaSegmentProvider,
+            interaction: interactionHandler
+        )
         self.frameIntervalNanoseconds = frameIntervalNanoseconds
     }
 
@@ -72,13 +79,14 @@ public final class PreviewWebServer {
         }
 
         let pusher = WebSocketFramePusher(
-            frameProvider: renderableFrameProvider,
-            interactionHandler: interactionHandler,
+            frameProvider: providers.renderableFrame,
+            interactionHandler: providers.interaction,
             frameIntervalNanoseconds: frameIntervalNanoseconds
         )
         self.framePusher = pusher
 
         let wsQueue = DispatchQueue(label: "simulator-preview-kit.websocket")
+        let p = providers
 
         let server = SimpleHTTPServer(
             requestedPort: configuration.requestedPort,
@@ -93,29 +101,11 @@ public final class PreviewWebServer {
                     return
                 }
                 pusher.addConnection(ws)
+            },
+            handler: { request in
+                await Self.handle(request: request, providers: p)
             }
-        ) { [
-            pageContextProvider,
-            cachedFrameProvider,
-            freshFrameProvider,
-            videoStatusProvider,
-            playlistProvider,
-            initializationSegmentProvider,
-            mediaSegmentProvider,
-            interactionHandler
-        ] request in
-            await Self.handle(
-                request: request,
-                pageContextProvider: pageContextProvider,
-                cachedFrameProvider: cachedFrameProvider,
-                freshFrameProvider: freshFrameProvider,
-                videoStatusProvider: videoStatusProvider,
-                playlistProvider: playlistProvider,
-                initializationSegmentProvider: initializationSegmentProvider,
-                mediaSegmentProvider: mediaSegmentProvider,
-                interactionHandler: interactionHandler
-            )
-        }
+        )
         let port = try await server.start()
         self.server = server
 
@@ -134,120 +124,134 @@ public final class PreviewWebServer {
         pageURL = nil
     }
 
+    // MARK: - Route handling
+
     private static func handle(
         request: SimpleHTTPRequest,
-        pageContextProvider: @escaping @Sendable () -> PreviewPageContext,
-        cachedFrameProvider: @escaping @Sendable () -> PreviewFrameSnapshot?,
-        freshFrameProvider: @escaping @Sendable () async throws -> PreviewFrameSnapshot?,
-        videoStatusProvider: @escaping @Sendable () -> PreviewVideoStreamStatus,
-        playlistProvider: @escaping @Sendable () -> Data?,
-        initializationSegmentProvider: @escaping @Sendable () -> Data?,
-        mediaSegmentProvider: @escaping @Sendable (String) -> Data?,
-        interactionHandler: @escaping @Sendable (PreviewInteractionEvent) async throws -> Void
+        providers p: Providers
     ) async -> SimpleHTTPResponse {
-        let rawPath = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
+        let rawPath = request.path
+            .split(separator: "?", maxSplits: 1)
+            .first.map(String.init) ?? request.path
 
         switch (request.method.uppercased(), rawPath) {
         case ("GET", "/"):
-            let context = pageContextProvider()
+            let ctx = p.pageContext()
             return .text(
                 EmbeddedWebAssets.indexHTML(
-                    deviceName: context.deviceName,
-                    frameIntervalMs: context.frameIntervalMilliseconds,
+                    deviceName: ctx.deviceName,
+                    frameIntervalMs: ctx.frameIntervalMilliseconds,
                     initialMode: "websocket"
                 ),
                 contentType: "text/html; charset=utf-8"
             )
         case ("GET", "/app.js"):
-            return .text(EmbeddedWebAssets.appJS, contentType: "application/javascript; charset=utf-8")
+            return .text(
+                EmbeddedWebAssets.appJS,
+                contentType: "application/javascript; charset=utf-8"
+            )
         case ("GET", "/vendor/hls.min.js"):
             guard !EmbeddedWebAssets.hlsJS.isEmpty else {
                 return .text("Not Found", statusCode: 404)
             }
-            return .text(EmbeddedWebAssets.hlsJS, contentType: "application/javascript; charset=utf-8")
+            return .text(
+                EmbeddedWebAssets.hlsJS,
+                contentType: "application/javascript; charset=utf-8"
+            )
         case ("GET", "/styles.css"):
-            return .text(EmbeddedWebAssets.stylesCSS, contentType: "text/css; charset=utf-8")
+            return .text(
+                EmbeddedWebAssets.stylesCSS,
+                contentType: "text/css; charset=utf-8"
+            )
         case ("GET", "/stream.m3u8"):
-            guard let playlist = playlistProvider() else {
+            guard let playlist = p.playlist() else {
                 return SimpleHTTPResponse(statusCode: 204)
             }
             return SimpleHTTPResponse(
                 statusCode: 200,
                 headers: [
                     "Content-Type": "application/vnd.apple.mpegurl",
-                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
+                    "Cache-Control": "no-store, no-cache"
                 ],
                 body: playlist
             )
         case ("GET", "/stream/init.mp4"):
-            guard let initializationSegment = initializationSegmentProvider() else {
+            guard let seg = p.initSegment() else {
                 return SimpleHTTPResponse(statusCode: 204)
             }
             return SimpleHTTPResponse(
                 statusCode: 200,
                 headers: [
                     "Content-Type": "video/mp4",
-                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
+                    "Cache-Control": "no-store, no-cache"
                 ],
-                body: initializationSegment
+                body: seg
             )
         case ("GET", let path) where path.hasPrefix("/stream/segments/"):
             let name = String(path.dropFirst("/stream/segments/".count))
-            guard let mediaSegment = mediaSegmentProvider(name) else {
+            guard let seg = p.mediaSegment(name) else {
                 return .text("Not Found", statusCode: 404)
             }
             return SimpleHTTPResponse(
                 statusCode: 200,
                 headers: [
                     "Content-Type": "video/iso.segment",
-                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
+                    "Cache-Control": "no-store, no-cache"
                 ],
-                body: mediaSegment
+                body: seg
             )
         case ("GET", "/stream/status"):
-            let status = videoStatusProvider()
+            let status = p.videoStatus()
             var payload: [String: String] = [
                 "ready": status.isReady ? "true" : "false",
                 "segmentCount": String(status.segmentCount)
             ]
-            if let lastError = status.lastError, !lastError.isEmpty {
-                payload["lastError"] = lastError
+            if let err = status.lastError, !err.isEmpty {
+                payload["lastError"] = err
             }
-            return (try? .json(payload)) ?? .text("{}", contentType: "application/json; charset=utf-8")
+            return (try? .json(payload))
+                ?? .text("{}", contentType: "application/json; charset=utf-8")
         case ("GET", "/frame"):
-            guard let frame = try? await freshFrameProvider() else {
+            guard let frame = try? await p.freshFrame() else {
                 return SimpleHTTPResponse(statusCode: 204)
             }
             return SimpleHTTPResponse(
                 statusCode: 200,
                 headers: [
                     "Content-Type": frame.contentType,
-                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
+                    "Cache-Control": "no-store, no-cache"
                 ],
                 body: frame.imageData
             )
         case ("POST", "/input"):
             do {
-                let event = try JSONDecoder().decode(PreviewInteractionEvent.self, from: request.body)
-                try await interactionHandler(event)
+                let event = try JSONDecoder().decode(
+                    PreviewInteractionEvent.self,
+                    from: request.body
+                )
+                try await p.interaction(event)
                 return try .json(["accepted": true], statusCode: 202)
             } catch {
-                return .text(PreviewError.userMessage(for: error), statusCode: 400)
+                return .text(
+                    PreviewError.userMessage(for: error),
+                    statusCode: 400
+                )
             }
         case ("GET", "/health"):
-            let context = pageContextProvider()
-            let videoStatus = videoStatusProvider()
+            let ctx = p.pageContext()
+            let vs = p.videoStatus()
             var payload: [String: String] = [
-                "deviceName": context.deviceName,
-                "frameAvailable": cachedFrameProvider() != nil ? "true" : "false",
+                "deviceName": ctx.deviceName,
+                "frameAvailable": p.cachedFrame() != nil ? "true" : "false",
                 "mode": "websocket",
-                "videoReady": videoStatus.isReady ? "true" : "false",
-                "videoSegmentCount": String(videoStatus.segmentCount)
+                "videoReady": vs.isReady ? "true" : "false",
+                "videoSegmentCount": String(vs.segmentCount)
             ]
-            if let lastError = videoStatus.lastError, !lastError.isEmpty {
-                payload["videoLastError"] = lastError
+            if let err = vs.lastError, !err.isEmpty {
+                payload["videoLastError"] = err
             }
-            return (try? .json(payload)) ?? .text("{}", contentType: "application/json; charset=utf-8")
+            return (try? .json(payload))
+                ?? .text("{}", contentType: "application/json; charset=utf-8")
         case ("POST", "/"), ("POST", "/frame"):
             return .text("Method Not Allowed", statusCode: 405)
         default:

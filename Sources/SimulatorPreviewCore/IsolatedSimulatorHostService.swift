@@ -206,7 +206,8 @@ public struct IsolatedSimulatorHostService {
             }
         }
 
-        let deviceType = try preferredDeviceType(preferredName: preferredName)
+        let effectiveName = requiresX86Runtime ? (preferredName ?? "iPhone 16 Pro") : preferredName
+        let deviceType = try preferredDeviceType(preferredName: effectiveName)
         let runtime = try latestRuntime(maxMajorVersion: requiresX86Runtime ? 19 : nil)
         let udid = try processRunner.capture(
             "xcrun",

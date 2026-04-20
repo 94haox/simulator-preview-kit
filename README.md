@@ -247,3 +247,4 @@ swift build
 swift test
 swift run simulator-preview-demo --help
 ```
+# simulator-preview-kit

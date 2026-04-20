@@ -69,15 +69,16 @@ public struct IsolatedSimulatorHostService {
         app: SimulatorPreviewApp,
         preferredDeviceName: String? = nil
     ) throws -> IsolatedSimulatorSession {
+        let needsRosetta = Self.requiresRosetta(appURL: app.appBundleURL)
         let selectedDevice = try selectOrCreatePreferredIPhoneDevice(
-            preferredName: preferredDeviceName ?? configuration.preferredDeviceName
+            preferredName: preferredDeviceName ?? configuration.preferredDeviceName,
+            requiresX86Runtime: needsRosetta
         )
         _ = try? terminate(bundleId: app.bundleIdentifier, in: selectedDevice)
-        let arch = Self.requiresRosetta(appURL: app.appBundleURL) ? "x86_64" : nil
-        if arch != nil {
+        if needsRosetta {
             _ = try? shutdown(selectedDevice)
         }
-        try boot(selectedDevice, arch: arch)
+        try boot(selectedDevice, arch: needsRosetta ? "x86_64" : nil)
         try waitForBoot(selectedDevice)
         try ensureInstalledAppIsCurrent(appURL: app.appBundleURL, bundleID: app.bundleIdentifier, device: selectedDevice)
         try launchOrInstallIfNeeded(appURL: app.appBundleURL, bundleID: app.bundleIdentifier, device: selectedDevice)
@@ -168,7 +169,10 @@ public struct IsolatedSimulatorHostService {
         try? removeInstalledAppState(bundleID: bundleId, deviceUDID: device.udid)
     }
 
-    func selectOrCreatePreferredIPhoneDevice(preferredName: String?) throws -> SelectedSimulator {
+    func selectOrCreatePreferredIPhoneDevice(
+        preferredName: String?,
+        requiresX86Runtime: Bool = false
+    ) throws -> SelectedSimulator {
         _ = try ensureDeviceSetExists()
         let devicesOutput = try processRunner.capture(
             "xcrun",
@@ -179,12 +183,31 @@ public struct IsolatedSimulatorHostService {
             maxBytes: 8 * 1024 * 1024
         )
         let devices = try SimulatorSupport.decodeAvailableIOSDevices(from: devicesOutput)
-        if let selected = SimulatorSupport.selectPreferredDevice(from: devices, preferredName: preferredName) {
+
+        if !requiresX86Runtime,
+           let selected = SimulatorSupport.selectPreferredDevice(
+               from: devices, preferredName: preferredName
+           ) {
             return selected
         }
 
+        // When x86_64 runtime needed, delete existing devices that are on iOS 26+
+        // and recreate with an older runtime
+        if requiresX86Runtime {
+            for device in devices {
+                _ = try? shutdown(device)
+                _ = try? processRunner.runCapturing(
+                    "xcrun",
+                    SimulatorSupport.simctlArguments(
+                        command: ["delete", device.udid],
+                        deviceSetPath: configuration.deviceSetPath
+                    )
+                )
+            }
+        }
+
         let deviceType = try preferredDeviceType(preferredName: preferredName)
-        let runtime = try latestRuntime()
+        let runtime = try latestRuntime(maxMajorVersion: requiresX86Runtime ? 19 : nil)
         let udid = try processRunner.capture(
             "xcrun",
             Self.createDeviceArguments(
@@ -286,15 +309,26 @@ public struct IsolatedSimulatorHostService {
         return selected
     }
 
-    private func latestRuntime() throws -> SimctlRuntime {
+    private func latestRuntime(maxMajorVersion: Int? = nil) throws -> SimctlRuntime {
         let output = try processRunner.capture(
             "xcrun",
-            SimulatorSupport.simctlArguments(command: ["list", "runtimes", "available", "--json"]),
+            SimulatorSupport.simctlArguments(
+                command: ["list", "runtimes", "available", "--json"]
+            ),
             maxBytes: 4 * 1024 * 1024
         )
-        let runtimes = try SimulatorSupport.decodeAvailableIOSRuntimes(from: output)
+        var runtimes = try SimulatorSupport.decodeAvailableIOSRuntimes(from: output)
+        if let maxMajor = maxMajorVersion {
+            runtimes = runtimes.filter { rt in
+                let version = SimulatorSupport.parseRuntimeVersion(rt.identifier)
+                return version.first.map { $0 < maxMajor } ?? true
+            }
+        }
         guard let runtime = SimulatorSupport.selectLatestRuntime(from: runtimes) else {
-            throw CommandFailure(message: "No available iOS Simulator runtime found.")
+            throw CommandFailure(
+                message: "No available iOS Simulator runtime found"
+                    + (maxMajorVersion.map { " (max iOS \($0))" } ?? "") + "."
+            )
         }
         return runtime
     }

@@ -74,6 +74,9 @@ public struct IsolatedSimulatorHostService {
         )
         _ = try? terminate(bundleId: app.bundleIdentifier, in: selectedDevice)
         let arch = Self.requiresRosetta(appURL: app.appBundleURL) ? "x86_64" : nil
+        if arch != nil {
+            _ = try? shutdown(selectedDevice)
+        }
         try boot(selectedDevice, arch: arch)
         try waitForBoot(selectedDevice)
         try ensureInstalledAppIsCurrent(appURL: app.appBundleURL, bundleID: app.bundleIdentifier, device: selectedDevice)
